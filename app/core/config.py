@@ -16,11 +16,20 @@ class Settings(BaseSettings):
     
     # AI Model Configuration
     openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
+    anthropic_api_key: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+    mistral_api_key: Optional[str] = Field(default=None, env="MISTRAL_API_KEY")
+    ollama_url: str = Field(default="http://localhost:11434", env="OLLAMA_URL")
+    
     model_name: str = Field(default="gpt-3.5-turbo", env="MODEL_NAME")
     max_tokens: int = Field(default=2000, env="MAX_TOKENS")
     
+    # Model Selection Strategy
+    auto_model_selection: bool = Field(default=True, env="AUTO_MODEL_SELECTION")
+    preferred_provider: Optional[str] = Field(default=None, env="PREFERRED_PROVIDER")
+    max_cost_per_token: Optional[float] = Field(default=None, env="MAX_COST_PER_TOKEN")
+    
     # Memory and Vector Database
-    memory_type: Literal["faiss", "chroma"] = Field(default="faiss", env="MEMORY_TYPE")
+    memory_type: Literal["simple", "faiss", "hybrid"] = Field(default="hybrid", env="MEMORY_TYPE")
     vector_dimension: int = Field(default=384, env="VECTOR_DIMENSION")
     max_memory_size: int = Field(default=1000, env="MAX_MEMORY_SIZE")
     

@@ -9,6 +9,15 @@ openai>=1.0.0
 sentence-transformers>=2.0.0
 faiss-cpu>=1.7.0
 
+# Additional AI Providers (optional)
+anthropic>=0.18.0
+mistralai>=0.4.0
+
+# LangGraph and Orchestration
+langgraph>=0.0.55
+langchain>=0.2.0
+langchain-community>=0.2.0
+
 # Task Queue and Background Processing
 celery>=5.3.0
 redis>=5.0.0
@@ -22,3 +31,10 @@ pytest-asyncio>=0.20.0
 
 # HTTP Client
 httpx>=0.25.0
+requests>=2.31.0
+
+# System Monitoring
+psutil>=5.9.0
+
+# WebSocket Support
+websockets>=11.0.0

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.memory import memory
+from app.core.model_router import router
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,8 @@ class AIAgent:
     def __init__(self):
         self.model_name = settings.model_name
         self.max_tokens = settings.max_tokens
-        self._client = None
+        self.auto_model_selection = settings.auto_model_selection
+        self._client = None  # Kept for backward compatibility
         
     def _get_client(self):
         """Get OpenAI client instance."""
@@ -110,48 +112,42 @@ Always provide clear, well-commented, and functional code. Explain your reasonin
     async def generate_code(self, request: CodeRequest) -> CodeResponse:
         """Generate code based on the request."""
         try:
-            client = self._get_client()
-            
             # Get relevant context from memory
             context_items = self._get_relevant_context(request.prompt)
             context_str = self._format_context(context_items)
             
-            # Build the prompt
-            full_prompt = f"Generate {request.language} code for the following request:\n\n{request.prompt}"
+            # Build the messages for multi-model router
+            system_prompt = self._build_system_prompt("code_generation")
+            user_prompt = f"Generate {request.language} code for the following request:\n\n{request.prompt}"
             
             if request.context:
-                full_prompt += f"\n\nAdditional context:\n{request.context}"
+                user_prompt += f"\n\nAdditional context:\n{request.context}"
             
-            full_prompt += context_str
+            user_prompt += context_str
             
-            # If no OpenAI client available, provide mock response
-            if client is None:
-                # Generate a simple mock response based on the request
-                if "hello" in request.prompt.lower():
-                    code = f"def hello_world():\n    print('Hello, World!')\n\nif __name__ == '__main__':\n    hello_world()"
-                    explanation = "This is a simple Hello World function that prints a greeting message."
-                elif "add" in request.prompt.lower() or "sum" in request.prompt.lower():
-                    code = f"def add_numbers(a, b):\n    return a + b\n\nresult = add_numbers(5, 3)\nprint(f'Result: {{result}}')"
-                    explanation = "This function adds two numbers and returns the result."
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Try using the multi-model router first
+            try:
+                if self.auto_model_selection:
+                    model_name = None  # Let router select
                 else:
-                    code = f"# Generated {request.language} code\n# TODO: Implement the requested functionality\npass"
-                    explanation = f"This is a placeholder for {request.prompt}. Please implement the actual functionality."
-            else:
-                # Call OpenAI API
-                response = client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": self._build_system_prompt("code_generation")},
-                        {"role": "user", "content": full_prompt}
-                    ],
+                    model_name = self.model_name
+                
+                result = await router.generate_completion(
+                    messages=messages,
+                    model_name=model_name,
+                    task_type="code_generation",
                     max_tokens=request.max_tokens or self.max_tokens,
                     temperature=0.1
                 )
                 
-                # Parse response
-                content = response.choices[0].message.content
+                content = result["content"]
                 
-                # Try to extract code and explanation
+                # Extract code and explanation
                 code_blocks = []
                 explanation = content
                 
@@ -178,19 +174,93 @@ Always provide clear, well-commented, and functional code. Explain your reasonin
                 
                 # Use the first code block if available, otherwise use full content
                 code = code_blocks[0] if code_blocks else content
-            
-            # Store in memory
-            memory.add_code_context(code, request.prompt, {
-                'language': request.language,
-                'timestamp': 'now'  # In production, use proper timestamp
-            })
-            
-            return CodeResponse(
-                code=code,
-                explanation=explanation,
-                language=request.language,
-                confidence=0.8  # Mock confidence score
-            )
+                
+                # Store in memory
+                memory.add_code_context(code, request.prompt, {
+                    'language': request.language,
+                    'model': result.get('selected_model', 'unknown'),
+                    'provider': result.get('provider', 'unknown'),
+                    'timestamp': 'now'
+                })
+                
+                return CodeResponse(
+                    code=code,
+                    explanation=explanation,
+                    language=request.language,
+                    confidence=0.9  # Higher confidence with advanced routing
+                )
+                
+            except Exception as router_error:
+                logger.warning(f"Multi-model router failed: {router_error}, falling back to legacy method")
+                
+                # Fallback to legacy OpenAI-only approach
+                client = self._get_client()
+                
+                # If no OpenAI client available, provide mock response
+                if client is None:
+                    # Generate a simple mock response based on the request
+                    if "hello" in request.prompt.lower():
+                        code = f"def hello_world():\n    print('Hello, World!')\n\nif __name__ == '__main__':\n    hello_world()"
+                        explanation = "This is a simple Hello World function that prints a greeting message."
+                    elif "add" in request.prompt.lower() or "sum" in request.prompt.lower():
+                        code = f"def add_numbers(a, b):\n    return a + b\n\nresult = add_numbers(5, 3)\nprint(f'Result: {{result}}')"
+                        explanation = "This function adds two numbers and returns the result."
+                    else:
+                        code = f"# Generated {request.language} code\n# TODO: Implement the requested functionality\npass"
+                        explanation = f"This is a placeholder for {request.prompt}. Please implement the actual functionality."
+                else:
+                    # Call OpenAI API directly
+                    response = client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        max_tokens=request.max_tokens or self.max_tokens,
+                        temperature=0.1
+                    )
+                    
+                    # Parse response
+                    content = response.choices[0].message.content
+                    
+                    # Try to extract code and explanation
+                    code_blocks = []
+                    explanation = content
+                    
+                    # Simple code block extraction
+                    if "```" in content:
+                        lines = content.split('\n')
+                        in_code_block = False
+                        current_code = []
+                        
+                        for line in lines:
+                            if line.strip().startswith("```"):
+                                if in_code_block:
+                                    if current_code:
+                                        code_blocks.append('\n'.join(current_code))
+                                    current_code = []
+                                    in_code_block = False
+                                else:
+                                    in_code_block = True
+                            elif in_code_block:
+                                current_code.append(line)
+                        
+                        if current_code:
+                            code_blocks.append('\n'.join(current_code))
+                    
+                    # Use the first code block if available, otherwise use full content
+                    code = code_blocks[0] if code_blocks else content
+                
+                # Store in memory
+                memory.add_code_context(code, request.prompt, {
+                    'language': request.language,
+                    'model': 'fallback',
+                    'timestamp': 'now'
+                })
+                
+                return CodeResponse(
+                    code=code,
+                    explanation=explanation,
+                    language=request.language,
+                    confidence=0.8  # Lower confidence for fallback
+                )
             
         except Exception as e:
             logger.error(f"Code generation failed: {e}")
@@ -199,8 +269,6 @@ Always provide clear, well-commented, and functional code. Explain your reasonin
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """Handle chat interactions."""
         try:
-            client = self._get_client()
-            
             # Get relevant context from memory if requested
             context_items = []
             if request.use_memory:
@@ -208,49 +276,89 @@ Always provide clear, well-commented, and functional code. Explain your reasonin
             
             context_str = self._format_context(context_items)
             
-            # Build the prompt
-            full_prompt = request.message
+            # Build the messages
+            system_prompt = self._build_system_prompt("general")
+            user_message = request.message
             
             if request.context:
-                full_prompt += f"\n\nContext: {request.context}"
+                user_message += f"\n\nContext: {request.context}"
             
-            full_prompt += context_str
+            user_message += context_str
             
-            # If no OpenAI client available, provide mock response
-            if client is None:
-                # Generate a simple mock response based on the message
-                if "hello" in request.message.lower() or "hi" in request.message.lower():
-                    assistant_response = "Hello! I'm your AI coding assistant. I can help you with code generation, debugging, and programming questions. How can I assist you today?"
-                elif "help" in request.message.lower():
-                    assistant_response = "I can help you with:\n- Code generation in various programming languages\n- Code review and optimization\n- Debugging assistance\n- Programming best practices\n- Architecture advice\n\nWhat would you like to work on?"
-                elif "code" in request.message.lower():
-                    assistant_response = "I'd be happy to help you with coding! Please let me know what specific programming task you need assistance with, and I'll generate the appropriate code for you."
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            
+            # Try using the multi-model router first
+            try:
+                if self.auto_model_selection:
+                    model_name = None  # Let router select
                 else:
-                    assistant_response = f"I understand you're asking about: {request.message}\n\nAs an AI coding assistant, I'm here to help with programming tasks. Could you provide more details about what you'd like me to help you code or debug?"
-            else:
-                # Call OpenAI API
-                response = client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": self._build_system_prompt("general")},
-                        {"role": "user", "content": full_prompt}
-                    ],
+                    model_name = self.model_name
+                
+                result = await router.generate_completion(
+                    messages=messages,
+                    model_name=model_name,
+                    task_type="chat",
                     max_tokens=self.max_tokens,
                     temperature=0.3
                 )
                 
-                assistant_response = response.choices[0].message.content
-            
-            # Store conversation in memory
-            memory.add_conversation(request.message, assistant_response, {
-                'timestamp': 'now'  # In production, use proper timestamp
-            })
-            
-            return ChatResponse(
-                response=assistant_response,
-                context_used=context_items,
-                confidence=0.8  # Mock confidence score
-            )
+                assistant_response = result["content"]
+                
+                # Store conversation in memory
+                memory.add_conversation(request.message, assistant_response, {
+                    'model': result.get('selected_model', 'unknown'),
+                    'provider': result.get('provider', 'unknown'),
+                    'timestamp': 'now'
+                })
+                
+                return ChatResponse(
+                    response=assistant_response,
+                    context_used=context_items,
+                    confidence=0.9  # Higher confidence with advanced routing
+                )
+                
+            except Exception as router_error:
+                logger.warning(f"Multi-model router failed: {router_error}, falling back to legacy method")
+                
+                # Fallback to legacy approach
+                client = self._get_client()
+                
+                # If no OpenAI client available, provide mock response
+                if client is None:
+                    # Generate a simple mock response based on the message
+                    if "hello" in request.message.lower() or "hi" in request.message.lower():
+                        assistant_response = "Hello! I'm your AI coding assistant. I can help you with code generation, debugging, and programming questions. How can I assist you today?"
+                    elif "help" in request.message.lower():
+                        assistant_response = "I can help you with:\n- Code generation in various programming languages\n- Code review and optimization\n- Debugging assistance\n- Programming best practices\n- Architecture advice\n\nWhat would you like to work on?"
+                    elif "code" in request.message.lower():
+                        assistant_response = "I'd be happy to help you with coding! Please let me know what specific programming task you need assistance with, and I'll generate the appropriate code for you."
+                    else:
+                        assistant_response = f"I understand you're asking about: {request.message}\n\nAs an AI coding assistant, I'm here to help with programming tasks. Could you provide more details about what you'd like me to help you code or debug?"
+                else:
+                    # Call OpenAI API
+                    response = client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=0.3
+                    )
+                    
+                    assistant_response = response.choices[0].message.content
+                
+                # Store conversation in memory
+                memory.add_conversation(request.message, assistant_response, {
+                    'model': 'fallback',
+                    'timestamp': 'now'
+                })
+                
+                return ChatResponse(
+                    response=assistant_response,
+                    context_used=context_items,
+                    confidence=0.8  # Lower confidence for fallback
+                )
             
         except Exception as e:
             logger.error(f"Chat interaction failed: {e}")
