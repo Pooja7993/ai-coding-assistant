@@ -13,6 +13,7 @@ import uvicorn
 
 from app.core.config import settings
 from app.api.routes import router
+from app.core.telemetry import TelemetryMiddleware, telemetry, start_metrics_collection
 
 # Configure logging
 logging.basicConfig(
@@ -42,6 +43,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize memory backend: {e}")
     
+    # Initialize model router
+    try:
+        from app.core.model_router import router as model_router
+        available_models = model_router.get_available_models()
+        logger.info(f"Model router initialized with {len(available_models)} available models: {available_models}")
+    except Exception as e:
+        logger.error(f"Failed to initialize model router: {e}")
+    
+    # Initialize plugin system
+    try:
+        from app.core.plugins import plugin_manager
+        plugin_manager.discover_plugins()
+        tools = plugin_manager.list_tools()
+        logger.info(f"Plugin system initialized with {len(tools)} tools")
+    except Exception as e:
+        logger.error(f"Failed to initialize plugin system: {e}")
+    
+    # Start telemetry collection
+    try:
+        start_metrics_collection()
+        logger.info("Telemetry collection started")
+    except Exception as e:
+        logger.error(f"Failed to start telemetry collection: {e}")
+    
     yield
     
     # Shutdown
@@ -66,6 +91,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add telemetry middleware
+app.add_middleware(TelemetryMiddleware, collector=telemetry)
 
 
 @app.exception_handler(Exception)
@@ -98,7 +126,11 @@ async def root() -> Dict[str, Any]:
             "review_code": "/api/review-code",
             "memory_stats": "/api/memory/stats",
             "clear_memory": "/api/memory/clear",
-            "search_memory": "/api/memory/search"
+            "search_memory": "/api/memory/search",
+            "model_info": "/api/models/info",
+            "tools_list": "/api/tools/list",
+            "telemetry_stats": "/api/telemetry/stats",
+            "health_status": "/api/telemetry/health"
         }
     }
 

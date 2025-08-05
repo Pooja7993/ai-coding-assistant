@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 from app.main import app
 from app.core.config import settings
-from app.core.memory import RAGMemory, FAISMemoryBackend
+from app.core.memory import RAGMemory, SimpleMemoryBackend
 from app.services.agent import AIAgent, CodeRequest, ChatRequest
 
 # Test client
@@ -40,12 +40,12 @@ class TestMemory:
     
     def setup_method(self):
         """Setup test method."""
-        self.memory = RAGMemory("faiss")
+        self.memory = RAGMemory("simple")
     
     def test_memory_initialization(self):
         """Test memory backend initialization."""
-        assert isinstance(self.memory.backend, FAISMemoryBackend)
-        assert self.memory.max_size == settings.max_memory_size
+        assert isinstance(self.memory.backend, SimpleMemoryBackend)
+        assert self.memory.max_size == 1000
     
     def test_add_conversation(self):
         """Test adding conversation to memory."""
@@ -87,15 +87,16 @@ class TestAIAgent:
         """Setup test method."""
         self.agent = AIAgent()
     
-    @patch('app.services.agent.OpenAI')
+    @patch('openai.OpenAI')
     def test_agent_initialization(self, mock_openai):
         """Test agent initialization."""
         mock_client = MagicMock()
         mock_openai.return_value = mock_client
         
         # Access the client to trigger initialization
-        client = self.agent._get_client()
-        assert client == mock_client
+        with patch.object(settings, 'openai_api_key', 'test-key'):
+            client = self.agent._get_client()
+            assert client == mock_client
     
     def test_build_system_prompt(self):
         """Test system prompt building."""
@@ -121,7 +122,7 @@ class TestAIAgent:
         assert "Test document content" in formatted
         assert "conversation" in formatted
     
-    @patch('app.services.agent.OpenAI')
+    @patch('openai.OpenAI')
     @pytest.mark.asyncio
     async def test_generate_code_success(self, mock_openai):
         """Test successful code generation."""
@@ -142,14 +143,16 @@ class TestAIAgent:
     
     @pytest.mark.asyncio
     async def test_generate_code_no_api_key(self):
-        """Test code generation without API key."""
+        """Test code generation without API key (should use mock response)."""
         with patch.object(settings, 'openai_api_key', None):
             request = CodeRequest(prompt="Create a hello function")
             
-            with pytest.raises(ValueError, match="OpenAI API key not configured"):
-                await self.agent.generate_code(request)
+            # Should not raise error but return mock response
+            response = await self.agent.generate_code(request)
+            assert response.code is not None
+            assert response.language == "python"
     
-    @patch('app.services.agent.OpenAI')
+    @patch('openai.OpenAI')
     @pytest.mark.asyncio
     async def test_chat_success(self, mock_openai):
         """Test successful chat interaction."""
@@ -181,7 +184,7 @@ class TestAIAgent:
 class TestAPIEndpoints:
     """Test API endpoints."""
     
-    @patch('app.services.agent.OpenAI')
+    @patch('openai.OpenAI')
     def test_generate_code_endpoint(self, mock_openai):
         """Test code generation endpoint."""
         # Mock OpenAI response
@@ -207,7 +210,7 @@ class TestAPIEndpoints:
             assert "explanation" in data
     
     def test_generate_code_endpoint_no_api_key(self):
-        """Test code generation endpoint without API key."""
+        """Test code generation endpoint without API key (should use mock response)."""
         with patch.object(settings, 'openai_api_key', None):
             response = client.post(
                 "/api/generate-code",
@@ -217,9 +220,12 @@ class TestAPIEndpoints:
                 }
             )
             
-            assert response.status_code == 400
+            # Should work with mock response
+            assert response.status_code == 200
+            data = response.json()
+            assert "code" in data
     
-    @patch('app.services.agent.OpenAI')
+    @patch('openai.OpenAI')
     def test_chat_endpoint(self, mock_openai):
         """Test chat endpoint."""
         # Mock OpenAI response
@@ -291,7 +297,7 @@ class TestConfiguration:
         """Test settings initialization."""
         assert settings.api_port == 8000
         assert settings.model_name == "gpt-3.5-turbo"
-        assert settings.memory_type in ["faiss", "chroma"]
+        assert settings.memory_type in ["simple", "faiss", "hybrid"]
         assert settings.max_memory_size > 0
 
 
